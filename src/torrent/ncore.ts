@@ -1,9 +1,12 @@
-import axios from "axios";
+import axios, { AxiosInstance } from "axios";
 import { wrapper } from "axios-cookiejar-support";
 import * as cheerio from "cheerio";
 import { CookieJar } from "tough-cookie";
 import { TorrentSearchResult } from "./search.js";
 import { isImdbId } from "../utils/imdb.js";
+import { createHash } from "crypto";
+import parseTorrent from 'parse-torrent';
+import { Torrent } from "webtorrent";
 
 const NCORE_USER = process.env.NCORE_USER;
 const NCORE_PASSWORD = process.env.NCORE_PASSWORD;
@@ -26,21 +29,9 @@ export const searchNcore = async (
   ncorePassword?: string
 ): Promise<TorrentSearchResult[]> => {
   try {
-    const user = ncoreUser || NCORE_USER;
-    const password = ncorePassword || NCORE_PASSWORD;
+    const client = ncoreClientFactory(ncoreUser, ncorePassword);
 
-    if (!user || !password) return [];
-
-    const jar = new CookieJar();
-    // @ts-ignore
-    const client = wrapper(axios.create({ jar, baseURL: "https://ncore.pro" }));
-
-    const formData = new FormData();
-    formData.append("nev", user);
-    formData.append("pass", password);
-    formData.append("set_lang", "hu");
-    formData.append("submitted", "1");
-    await client.post("/login.php", formData);
+    if (!client) return [];
 
     const torrents: TorrentSearchResult[] = [];
 
@@ -66,8 +57,7 @@ export const searchNcore = async (
         const torrentsPage = await client.get(link);
         const $ = cheerio.load(torrentsPage.data);
 
-        const rssUrl = $("link[rel=alternate]").attr("href");
-        const downloadKey = rssUrl?.split("=")[1];
+        const downloadKey = getDownloadKey($);
         if (!downloadKey) return torrents;
 
         for (const el of $("div.box_torrent")) {
@@ -86,7 +76,7 @@ export const searchNcore = async (
           const seeds = Number($(el).find("div.box_s2").text());
           const peers = Number($(el).find("div.box_l2").text());
           const torrentId = $(el).next().next().attr("id");
-          const torrent = `https://ncore.pro/torrents.php?action=download&id=${torrentId}&key=${downloadKey}`;
+          const torrent = createTorrentUrl(torrentId, downloadKey);
 
           if (!name || !torrentId) continue;
 
@@ -112,6 +102,13 @@ export const searchNcore = async (
     return [];
   }
 };
+
+const getDownloadKey = ($: cheerio.CheerioAPI) => {
+  const rssUrl = $("link[rel=alternate]").attr("href");
+  return rssUrl?.split("=")[1];
+}
+
+const createTorrentUrl = (torrentId: string, downloadKey: string) => `https://ncore.pro/torrents.php?action=download&id=${torrentId}&key=${downloadKey}`;
 
 const parseCategory = (category: string | undefined) => {
   const categories: Record<NcoreCategory, string> = {
@@ -144,3 +141,75 @@ const parseSize = (size: string) => {
 
   return Math.ceil(sizeNum * units[unit]);
 };
+
+const ncoreClients = new Map<string, AxiosInstance>();
+
+export const ncoreClientFactory = (ncoreUser?: string, ncorePassword?: string) => {
+  const user = ncoreUser || NCORE_USER;
+  const password = ncorePassword || NCORE_PASSWORD;
+
+  if (!user || !password) return undefined;
+
+  const hash = createHash('md5').update(`${user}|${password}`).digest('hex');
+
+  if (!ncoreClients.has(hash)) {
+    const jar = new CookieJar();
+
+    // @ts-ignore
+    const client: AxiosInstance = wrapper(axios.create({ jar, baseURL: "https://ncore.pro" }));
+
+    client.interceptors.response.use(async (response) => {
+      const originalRequest = response.config;
+
+      const loginRequested = originalRequest.url === '/login.php';
+
+      if (!loginRequested) {
+        if (response.request?.path?.includes('/login.php')) {
+          console.log('Re authenticating nCore user...')
+
+          const formData = new FormData();
+          formData.append("nev", user);
+          formData.append("pass", password);
+          formData.append("set_lang", "hu");
+          formData.append("submitted", "1");
+
+          await client.post("/login.php", formData);
+
+          return client(originalRequest);
+        }
+      }
+
+      return response;
+    });
+
+    ncoreClients.set(hash, client);
+  }
+
+  return ncoreClients.get(hash);
+}
+
+export const filterExpiredTorrents = async (
+  torrents: Torrent[],
+  ncoreUser?: string,
+  ncorePassword?: string
+) => {
+  const client = ncoreClientFactory(ncoreUser, ncorePassword);
+
+  if (!client) return [];
+
+  const hitnRunPage = await client.get('/hitnrun.php?showall=false')
+  const $ = cheerio.load(hitnRunPage.data);
+  const downloadKey = getDownloadKey($);
+  const hitnRunTorrents = await Promise.all($('.hnr_torrents .hnr_tname a').toArray().map(async (a) => {
+    const href = $(a).attr("href");
+    const url = new URL(href, 'https://ncore.pro');
+    const torrentId = url.searchParams.get('id');
+    const torrentUrl = createTorrentUrl(torrentId, downloadKey);
+    const torrentFile = await client.get(torrentUrl, {
+      responseType: 'arraybuffer',
+    });
+    return parseTorrent(torrentFile.data);
+  }));
+
+  return torrents.filter((t) => !hitnRunTorrents.some((hnrt) => hnrt.infoHash === t.infoHash))
+}

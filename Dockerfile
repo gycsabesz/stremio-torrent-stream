@@ -1,9 +1,9 @@
-ARG NODE_VERSION=20.11.1
-ARG PNPM_VERSION=8.15.4
-ARG TS_VERSION=5.3.3
+ARG NODE_VERSION=23.5.0
+ARG PNPM_VERSION=9.15.1
+ARG TS_VERSION=5.7.2
 
 # Builder stage
-FROM node:${NODE_VERSION} as build
+FROM node:${NODE_VERSION} AS build
 
 WORKDIR /usr/src/app
 
@@ -22,30 +22,36 @@ RUN pnpm run build
 RUN pnpm prune --prod
 
 # Runner stage
-FROM node:${NODE_VERSION}-slim as final
+FROM node:${NODE_VERSION}-slim AS final
 
 COPY package.json .
 COPY --from=build /usr/src/app/node_modules ./node_modules
 COPY --from=build /usr/src/app/dist ./dist
 
-ENV NODE_ENV production
-ENV HTTPS_METHOD local-ip.medicmobile.org
-ENV DOWNLOAD_DIR /data
-ENV KEEP_DOWNLOADED_FILES false
-ENV MAX_CONNS_PER_TORRENT 50
-ENV DOWNLOAD_SPEED_LIMIT 20971520
-ENV UPLOAD_SPEED_LIMIT 1048576
-ENV SEED_TIME 60000
-ENV TORRENT_TIMEOUT 5000
+ENV NODE_ENV=production
+ENV HTTPS_METHOD=local-ip.medicmobile.org
+ENV DOWNLOAD_DIR=/data
+ENV TORRENT_DIR=/torrents
+ENV KEEP_DOWNLOADED_FILES=false
+ENV MAX_CONNS_PER_TORRENT=50
+ENV DOWNLOAD_SPEED_LIMIT=20971520
+ENV UPLOAD_SPEED_LIMIT=1048576
+ENV SEED_TIME=60000
+ENV TORRENT_TIMEOUT=5000
 
 VOLUME /data
 
 RUN mkdir -p /data
 RUN chown -R node /data
 
+VOLUME /torrents
+
+RUN mkdir -p /torrents
+RUN chown -R node /torrents
+
 USER node
 
 EXPOSE 58827
 EXPOSE 58828
 
-CMD npm start
+CMD ["npm", "start"]

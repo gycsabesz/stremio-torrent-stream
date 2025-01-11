@@ -4,6 +4,7 @@ import os from "os";
 import path from "path";
 import WebTorrent, { Torrent } from "webtorrent";
 import { getReadableDuration } from "../utils/file.js";
+import * as torrentstore from './torrentstore.js';
 
 interface FileInfo {
   name: string;
@@ -73,6 +74,7 @@ const streamClient = new WebTorrent({
 
 streamClient.on("torrent", (torrent) => {
   console.log(`Added torrent: ${torrent.name}`);
+  torrentstore.add(torrent);
 });
 
 streamClient.on("error", (error) => {
@@ -87,6 +89,8 @@ streamClient.on("error", (error) => {
 infoClient.on("error", () => {});
 
 const launchTime = Date.now();
+
+export const getTorrents = () => streamClient.torrents
 
 export const getStats = () => ({
   uptime: getReadableDuration(Date.now() - launchTime),
@@ -114,7 +118,7 @@ export const getStats = () => ({
   })),
 });
 
-export const getOrAddTorrent = (uri: string) =>
+export const getOrAddTorrent = (uri: string, torrentTimeout = TORRENT_TIMEOUT) =>
   new Promise<Torrent | undefined>((resolve) => {
     const torrent = streamClient.add(
       uri,
@@ -131,9 +135,10 @@ export const getOrAddTorrent = (uri: string) =>
     );
 
     const timeout = setTimeout(() => {
+      console.log(`Failed to load torrent in ${getReadableDuration(torrentTimeout)}. Stop loading.`);
       torrent.destroy();
       resolve(undefined);
-    }, TORRENT_TIMEOUT);
+    }, torrentTimeout);
   });
 
 export const getFile = (torrent: Torrent, path: string) =>
@@ -212,3 +217,24 @@ export const streamClosed = (hash: string, fileName: string) => {
 
   timeouts.set(hash, timeout);
 };
+
+torrentstore.on('continue', async (torrent) => {
+  console.log(`Continue torrent seeding ${torrent}`);
+  await getOrAddTorrent(torrent, 2 * 60 * 1000);
+});
+
+torrentstore.on('remove', async (torrent) => {
+  console.log(`Removing torrent: ${torrent}`);
+  const torrentFile = await fs.readFile(torrent);
+  const streamTorrent = await streamClient.get(torrentFile);
+
+  if (streamTorrent) {
+    streamTorrent.destroy({
+      destroyStore: true
+    }, () => {
+      console.log(`Removed torrent and related files: ${streamTorrent.name}`);
+    });
+  }
+});
+
+torrentstore.reloadExistings();
