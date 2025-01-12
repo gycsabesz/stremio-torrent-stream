@@ -1,10 +1,10 @@
 import fs from "fs-extra";
-import MemoryStore from "memory-chunk-store";
 import os from "os";
 import path from "path";
 import WebTorrent, { Torrent } from "webtorrent";
 import { getReadableDuration } from "../utils/file.js";
 import * as torrentstore from './torrentstore.js';
+import { remote as parseTorrent, Instance } from 'parse-torrent';
 
 interface FileInfo {
   name: string;
@@ -64,7 +64,6 @@ const SEED_TIME = Number(process.env.SEED_TIME) || 60 * 1000;
 // Timeout (ms) when adding torrents if no metadata is received (default 5 seconds)
 const TORRENT_TIMEOUT = Number(process.env.TORRENT_TIMEOUT) || 5 * 1000;
 
-const infoClient = new WebTorrent();
 const streamClient = new WebTorrent({
   // @ts-ignore
   downloadLimit: DOWNLOAD_SPEED_LIMIT,
@@ -85,8 +84,6 @@ streamClient.on("error", (error) => {
     console.error(`Error: ${error.message}`);
   }
 });
-
-infoClient.on("error", () => {});
 
 const launchTime = Date.now();
 
@@ -145,7 +142,7 @@ export const getFile = (torrent: Torrent, path: string) =>
   torrent.files.find((file) => file.path === path);
 
 export const getTorrentInfo = async (uri: string) => {
-  const getInfo = (torrent: Torrent): TorrentInfo => ({
+  const getInfo = (torrent: Instance): TorrentInfo => ({
     name: torrent.name,
     infoHash: torrent.infoHash,
     size: torrent.length,
@@ -156,24 +153,14 @@ export const getTorrentInfo = async (uri: string) => {
     })),
   });
 
-  return await new Promise<TorrentInfo | undefined>((resolve) => {
-    const torrent = infoClient.add(
-      uri,
-      { store: MemoryStore, destroyStoreOnDestroy: true },
-      (torrent) => {
-        clearTimeout(timeout);
-        const info = getInfo(torrent);
-        console.log(`Fetched info: ${info.name}`);
-        torrent.destroy();
-        resolve(info);
-      }
-    );
+  const torrentInstance = await new Promise<Instance>((resolve, reject) => {
+    parseTorrent(uri, (err, parsedTorrent) => {
+      if (err) reject(err);
+      resolve(parsedTorrent);
+    })
+  })
 
-    const timeout = setTimeout(() => {
-      torrent.destroy();
-      resolve(undefined);
-    }, TORRENT_TIMEOUT);
-  });
+  return getInfo(torrentInstance);
 };
 
 const timeouts = new Map<string, NodeJS.Timeout>();
